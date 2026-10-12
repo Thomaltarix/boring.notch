@@ -21,22 +21,33 @@
 <p align="center">
   <a href="https://trendshift.io/repositories/14815?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-14815" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/14815" alt="TheBoredTeam%2Fboring.notch |    Trendshift" width="250" height="55"/></a>
 </p>
-> [!NOTE]
-> **This is "My Boring Notch", a personal fork of [TheBoredTeam/boring.notch](https://github.com/TheBoredTeam/boring.notch).**
-> Changes compared to upstream:
-> - **Spotify shuffle / repeat fixed**: they now go through Spotify's AppleScript (Spotify ignores MediaRemote shuffle commands), and the real state is read back from Spotify.
-> - **Spotify like (heart button)**: adds/removes the current track from your Liked Songs through the Spotify Web API.
-> - Renamed to *My Boring Notch*, and Sparkle no longer pulls official updates (they would overwrite the fork).
->
-> **Setting up Spotify likes** (Settings → Media → Spotify likes):
-> 1. **Spotify Premium is required.** Since February 2026, Spotify only lets Premium accounts own Web API apps (Development Mode, max 5 users).
-> 2. Create an app on the [Spotify developer dashboard](https://developer.spotify.com/dashboard) with *Web API* enabled.
-> 3. Add the redirect URI `http://127.0.0.1:43821/callback`.
-> 4. Paste the app's Client ID in the settings and click **Connect Spotify**.
->
-> No secrets are stored in the repository: the Client ID lives in the app's preferences and the Spotify token in the macOS Keychain.
->
-> **Building**: select your own Apple Development team in Xcode (Signing & Capabilities, both targets) before building; the bundled `MediaRemoteAdapter.framework` is re-signed with it.
+
+## 🍴 About this fork: My Boring Notch
+
+This is a personal fork of [TheBoredTeam/boring.notch](https://github.com/TheBoredTeam/boring.notch).
+
+### Changes compared to upstream
+
+- **Spotify shuffle / repeat fixed**: they now go through Spotify's AppleScript (Spotify ignores MediaRemote shuffle commands), and the real state is read back from Spotify.
+- **Spotify like (heart button)**: adds or removes the current track from your Liked Songs through the Spotify Web API.
+- **Renamed to *My Boring Notch***, and Sparkle no longer pulls official updates (they would overwrite the fork).
+
+### Setting up Spotify likes
+
+> [!IMPORTANT]
+> **Spotify Premium is required.** Since February 2026, Spotify only lets Premium accounts own Web API apps (Development Mode, max 5 users).
+
+1. Create an app on the [Spotify developer dashboard](https://developer.spotify.com/dashboard) with *Web API* enabled.
+2. Add the redirect URI `http://127.0.0.1:43821/callback`.
+3. In My Boring Notch, open **Settings → Media → Spotify likes**, paste the app's Client ID and click **Connect Spotify**.
+
+No secrets are stored in the repository: the Client ID lives in the app's preferences and the Spotify token in the macOS Keychain.
+
+### Building
+
+Select your own Apple Development team in Xcode (**Signing & Capabilities**, for both the `boringNotch` and `BoringNotchXPCHelper` targets) before building. The bundled `MediaRemoteAdapter.framework` is re-signed with it, otherwise Release builds crash at launch.
+
+---
 
 <!--Welcome to **Boring.Notch**, the coolest way to make your MacBook's notch the star of the show! Forget about those boring status bars—our notch turns into a dynamic music control center, complete with a snazzy visualizer and all the music controls you need. It's like having a mini concert right at the top of your screen! -->
 
