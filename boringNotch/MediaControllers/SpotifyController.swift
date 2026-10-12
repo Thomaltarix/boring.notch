@@ -11,7 +11,21 @@ import SwiftUI
 
 class SpotifyController: MediaControllerProtocol {
     func setFavorite(_ favorite: Bool) async {
-        //Placeholder
+        guard SpotifyScripting.isSavable(currentTrackURI) else { return }
+        let uri = currentTrackURI
+
+        // Optimistic update so the heart reacts immediately
+        let previous = playbackState.isFavorite
+        playbackState.isFavorite = favorite
+
+        do {
+            try await SpotifyWebAPI.shared.setSaved(favorite, uri: uri)
+            favoriteURI = uri
+            favoriteValue = favorite
+        } catch {
+            print("[SpotifyController] Spotify like failed: \(error.localizedDescription)")
+            playbackState.isFavorite = previous
+        }
     }
     
     // MARK: - Properties
@@ -27,7 +41,12 @@ class SpotifyController: MediaControllerProtocol {
         return true
     }
 
-    var supportsFavorite: Bool { false }
+    /// Likes go through the Spotify Web API (see SpotifyWebAPI), once connected in Settings.
+    var supportsFavorite: Bool { SpotifyWebAPI.shared.isReady }
+
+    private var currentTrackURI: String = ""
+    private var favoriteURI: String?
+    private var favoriteValue: Bool = false
 
     private var notificationTask: Task<Void, Never>?
     
@@ -77,11 +96,15 @@ class SpotifyController: MediaControllerProtocol {
     }
     
     func toggleShuffle() async {
-        await executeAndRefresh("set shuffling to not shuffling")
+        if let isShuffled = await SpotifyScripting.toggleShuffle() {
+            playbackState.isShuffled = isShuffled
+        }
     }
     
     func toggleRepeat() async {
-        await executeAndRefresh("set repeating to not repeating")
+        if let isRepeating = await SpotifyScripting.toggleRepeat() {
+            playbackState.repeatMode = isRepeating ? .all : .off
+        }
     }
     
     func setVolume(_ level: Double) async {
@@ -98,7 +121,7 @@ class SpotifyController: MediaControllerProtocol {
     
     func updatePlaybackInfo() async {
         guard let descriptor = try? await fetchPlaybackInfoAsync() else { return }
-        guard descriptor.numberOfItems >= 10 else { return }
+        guard descriptor.numberOfItems >= 11 else { return }
         
         let isPlaying = descriptor.atIndex(1)?.booleanValue ?? false
         let currentTrack = descriptor.atIndex(2)?.stringValue ?? "Unknown"
@@ -110,6 +133,19 @@ class SpotifyController: MediaControllerProtocol {
         let isRepeating = descriptor.atIndex(8)?.booleanValue ?? false
         let volumePercentage = descriptor.atIndex(9)?.int32Value ?? 50
         let artworkURL = descriptor.atIndex(10)?.stringValue ?? ""
+        let trackURI = descriptor.atIndex(11)?.stringValue ?? ""
+
+        // Liked Songs state (only queried when the track changes, or after a like)
+        let api = SpotifyWebAPI.shared
+        var isFavorite = api.isReady && favoriteURI == trackURI ? favoriteValue : false
+        if api.isReady, SpotifyScripting.isSavable(trackURI), favoriteURI != trackURI {
+            if let saved = try? await api.isSaved(uri: trackURI) {
+                isFavorite = saved
+                favoriteURI = trackURI
+                favoriteValue = saved
+            }
+        }
+        currentTrackURI = trackURI
         
         var state = PlaybackState(
             bundleIdentifier: "com.spotify.client",
@@ -124,7 +160,8 @@ class SpotifyController: MediaControllerProtocol {
             repeatMode: isRepeating ? .all : .off,
             lastUpdated: Date(),
             artwork: nil,
-            volume: Double(volumePercentage) / 100.0
+            volume: Double(volumePercentage) / 100.0,
+            isFavorite: isFavorite
         )
 
         if artworkURL == lastArtworkURL, let existingArtwork = self.playbackState.artwork {
@@ -188,9 +225,10 @@ class SpotifyController: MediaControllerProtocol {
                 set repeatState to repeating
                 set currentVolume to sound volume
                 set artworkURL to artwork url of current track
-                return {playerState, currentTrackName, currentTrackArtist, currentTrackAlbum, trackPosition, trackDuration, shuffleState, repeatState, currentVolume, artworkURL}
+                set trackURI to id of current track
+                return {playerState, currentTrackName, currentTrackArtist, currentTrackAlbum, trackPosition, trackDuration, shuffleState, repeatState, currentVolume, artworkURL, trackURI}
             on error
-                return {false, "Unknown", "Unknown", "Unknown", 0, 0, false, false, 50, ""}
+                return {false, "Unknown", "Unknown", "Unknown", 0, 0, false, false, 50, "", ""}
             end try
         end tell
         """

@@ -677,6 +677,10 @@ struct Media: View {
                 Text("Media playback live activity")
             }
             
+            if mediaController == .spotify || mediaController == .nowPlaying {
+                SpotifyLikesSettingsSection()
+            }
+
             Section {
                 MusicSlotConfigurationView()
                 Defaults.Toggle(key: .enableLyrics) {
@@ -703,6 +707,62 @@ struct Media: View {
             return MediaControllerType.allCases.filter { $0 != .nowPlaying }
         } else {
             return MediaControllerType.allCases
+        }
+    }
+}
+
+struct SpotifyLikesSettingsSection: View {
+    @Default(.spotifyClientID) private var spotifyClientID
+    @ObservedObject private var spotifyAPI = SpotifyWebAPI.shared
+
+    var body: some View {
+        Section {
+            TextField("Client ID", text: $spotifyClientID)
+                .textFieldStyle(.roundedBorder)
+                .disabled(spotifyAPI.isAuthorized)
+
+            HStack {
+                if spotifyAPI.isAuthorized {
+                    Label("Connected", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Spacer()
+                    Button("Disconnect") {
+                        spotifyAPI.signOut()
+                    }
+                } else {
+                    Text(spotifyAPI.isAuthorizing ? "Waiting for Spotify in your browser…" : "Not connected")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Connect Spotify") {
+                        Task { await spotifyAPI.authorize() }
+                    }
+                    .disabled(
+                        spotifyClientID.trimmingCharacters(in: .whitespaces).isEmpty
+                            || spotifyAPI.isAuthorizing
+                    )
+                }
+            }
+
+            if let error = spotifyAPI.lastError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        } header: {
+            Text("Spotify likes")
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Spotify's AppleScript can't like tracks, so the heart button uses the Spotify Web API. Create an app on the Spotify developer dashboard (Web API), add this redirect URI, then paste its Client ID here:")
+                Text(SpotifyWebAPI.redirectURI)
+                    .textSelection(.enabled)
+                    .monospaced()
+                Text("Requires Spotify Premium: since February 2026, Spotify only lets Premium accounts own Web API apps.")
+                    .foregroundStyle(.orange)
+                Link("Open the Spotify developer dashboard", destination: SpotifyWebAPI.dashboardURL)
+                    .foregroundColor(.blue)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
     }
 }

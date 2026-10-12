@@ -283,12 +283,27 @@ class MusicManager: ObservableObject {
         if state.isFavorite != self.isFavoriteTrack {
             self.isFavoriteTrack = state.isFavorite
         }
+
+        // Favorite support can depend on the playing app (Now Playing) or on the
+        // Spotify Web API connection, so re-evaluate it on every update.
+        let supportsFavorite = activeController?.supportsFavorite ?? false
+        if supportsFavorite != self.canFavoriteTrack {
+            self.canFavoriteTrack = supportsFavorite
+        }
         
         if volumeChanged {
             self.volume = state.volume
         }
         
         self.timestampDate = state.lastUpdated
+    }
+
+    /// Re-evaluates whether the heart button is usable (e.g. after connecting Spotify).
+    func refreshFavoriteSupport() {
+        DispatchQueue.main.async {
+            self.canFavoriteTrack = self.activeController?.supportsFavorite ?? false
+            self.forceUpdate()
+        }
     }
 
     func toggleFavoriteTrack() {

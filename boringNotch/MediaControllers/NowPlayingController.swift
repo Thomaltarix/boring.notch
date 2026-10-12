@@ -11,7 +11,65 @@ import Foundation
 
 final class NowPlayingController: ObservableObject, MediaControllerProtocol {
     func updatePlaybackInfo() async {
-        await fetchFavoriteStateIfSupported()
+        if playbackState.bundleIdentifier == SpotifyScripting.bundleIdentifier {
+            await syncSpotifyExtras(forceFavoriteRefresh: true)
+        } else {
+            await fetchFavoriteStateIfSupported()
+        }
+    }
+
+    // MARK: - Spotify
+    // Spotify ignores MediaRemote shuffle/repeat commands and doesn't report its shuffle
+    // state reliably through MediaRemote, so for Spotify we go through AppleScript instead.
+    private var spotifyExtras: SpotifyScripting.Extras?
+    private var spotifyFavoriteURI: String?
+    private var spotifyFavoriteValue: Bool = false
+    private var spotifySyncInProgress = false
+    private var spotifyNotificationTask: Task<Void, Never>?
+
+    private func observeSpotifyNotifications() {
+        spotifyNotificationTask = Task { [weak self] in
+            let notifications = DistributedNotificationCenter.default().notifications(
+                named: NSNotification.Name("com.spotify.client.PlaybackStateChanged")
+            )
+            for await _ in notifications {
+                guard let self else { return }
+                if self.playbackState.bundleIdentifier == SpotifyScripting.bundleIdentifier {
+                    await self.syncSpotifyExtras()
+                }
+            }
+        }
+    }
+
+    /// Reads shuffle/repeat/track URI from Spotify and, if the Web API is connected,
+    /// whether the current track is in Liked Songs.
+    private func syncSpotifyExtras(forceFavoriteRefresh: Bool = false) async {
+        guard !spotifySyncInProgress else { return }
+        spotifySyncInProgress = true
+        defer { spotifySyncInProgress = false }
+
+        guard let extras = await SpotifyScripting.fetchExtras() else { return }
+        spotifyExtras = extras
+
+        let api = SpotifyWebAPI.shared
+        var favorite = api.isReady && spotifyFavoriteURI == extras.trackURI ? spotifyFavoriteValue : false
+        if api.isReady, SpotifyScripting.isSavable(extras.trackURI),
+           forceFavoriteRefresh || spotifyFavoriteURI != extras.trackURI {
+            if let saved = try? await api.isSaved(uri: extras.trackURI) {
+                favorite = saved
+                spotifyFavoriteURI = extras.trackURI
+                spotifyFavoriteValue = saved
+            }
+        }
+
+        guard playbackState.bundleIdentifier == SpotifyScripting.bundleIdentifier else { return }
+        var updated = playbackState
+        updated.isShuffled = extras.isShuffled
+        updated.repeatMode = extras.isRepeating ? .all : .off
+        updated.isFavorite = favorite
+        if updated != playbackState {
+            playbackState = updated
+        }
     }
 
     // MARK: - Properties
@@ -30,12 +88,20 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
 
     var supportsFavorite: Bool {
         let bundleID = playbackState.bundleIdentifier
+        if bundleID == SpotifyScripting.bundleIdentifier {
+            return SpotifyWebAPI.shared.isReady
+        }
         return bundleID == "com.apple.Music"
     }
 
     func setFavorite(_ favorite: Bool) async {
         let bundleID = playbackState.bundleIdentifier
-        
+
+        if bundleID == SpotifyScripting.bundleIdentifier {
+            await setSpotifyFavorite(favorite)
+            return
+        }
+
         if bundleID == "com.apple.Music" {
             let runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Music")
             if !runningApps.isEmpty {
@@ -53,6 +119,26 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
         // Update the favorite state locally and fetch updated info
         try? await Task.sleep(for: .milliseconds(150))
         await updatePlaybackInfo()
+    }
+
+    private func setSpotifyFavorite(_ favorite: Bool) async {
+        if spotifyExtras == nil {
+            spotifyExtras = await SpotifyScripting.fetchExtras()
+        }
+        guard let uri = spotifyExtras?.trackURI, SpotifyScripting.isSavable(uri) else { return }
+
+        // Optimistic update so the heart reacts immediately
+        let previous = playbackState.isFavorite
+        playbackState.isFavorite = favorite
+
+        do {
+            try await SpotifyWebAPI.shared.setSaved(favorite, uri: uri)
+            spotifyFavoriteURI = uri
+            spotifyFavoriteValue = favorite
+        } catch {
+            print("[NowPlayingController] Spotify like failed: \(error.localizedDescription)")
+            playbackState.isFavorite = previous
+        }
     }
 
     private var lastMusicItem:
@@ -97,10 +183,12 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
             MRMediaRemoteSetRepeatModePointer, to: (@convention(c) (Int) -> Void).self)
 
         Task { await setupNowPlayingObserver() }
+        observeSpotifyNotifications()
     }
 
     deinit {
         streamTask?.cancel()
+        spotifyNotificationTask?.cancel()
         
         if let pipeHandler = self.pipeHandler {
             Task { await pipeHandler.close()
@@ -148,12 +236,26 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
     }
     
     func toggleShuffle() async {
+        if playbackState.bundleIdentifier == SpotifyScripting.bundleIdentifier {
+            if let isShuffled = await SpotifyScripting.toggleShuffle() {
+                spotifyExtras?.isShuffled = isShuffled
+                playbackState.isShuffled = isShuffled
+            }
+            return
+        }
         // MRMediaRemoteSendCommandFunction(6, nil)
         MRMediaRemoteSetShuffleModeFunction(playbackState.isShuffled ? 1 : 3)
         playbackState.isShuffled.toggle()
     }
-    
+
     func toggleRepeat() async {
+        if playbackState.bundleIdentifier == SpotifyScripting.bundleIdentifier {
+            if let isRepeating = await SpotifyScripting.toggleRepeat() {
+                spotifyExtras?.isRepeating = isRepeating
+                playbackState.repeatMode = isRepeating ? .all : .off
+            }
+            return
+        }
         // MRMediaRemoteSendCommandFunction(7, nil)
         let newRepeatMode = (playbackState.repeatMode == .off) ? 3 : (playbackState.repeatMode.rawValue - 1)
         playbackState.repeatMode = RepeatMode(rawValue: newRepeatMode) ?? .off
@@ -292,9 +394,31 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
         )
         
         newPlaybackState.volume = payload.volume ?? (diff ? self.playbackState.volume : 0.5)
-        
+
+        let previousState = self.playbackState
+        let sameTrack = previousState.bundleIdentifier == newPlaybackState.bundleIdentifier
+            && previousState.title == newPlaybackState.title
+            && previousState.artist == newPlaybackState.artist
+        // Keep the like state while the track doesn't change (the adapter doesn't report it)
+        newPlaybackState.isFavorite = sameTrack ? previousState.isFavorite : false
+
+        let isSpotify = newPlaybackState.bundleIdentifier == SpotifyScripting.bundleIdentifier
+        if isSpotify, let extras = spotifyExtras {
+            // MediaRemote's shuffle/repeat values are unreliable for Spotify
+            newPlaybackState.isShuffled = extras.isShuffled
+            newPlaybackState.repeatMode = extras.isRepeating ? .all : .off
+        }
+
         self.playbackState = newPlaybackState
-        
+
+        if isSpotify && (!sameTrack || spotifyExtras == nil) {
+            Task { [weak self] in
+                // Give Spotify a moment so AppleScript reports the new track
+                try? await Task.sleep(for: .milliseconds(300))
+                await self?.syncSpotifyExtras()
+            }
+        }
+
         // Fetch favorite state for supported apps asynchronously
         // await fetchFavoriteStateIfSupported()
     }
