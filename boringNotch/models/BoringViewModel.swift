@@ -30,6 +30,8 @@ class BoringViewModel: NSObject, ObservableObject {
 
     @Published var edgeAutoOpenActive: Bool = false
     @Published var isHoveringCalendar: Bool = false
+    /// Scrolling over the music player changes the volume instead of closing the notch
+    @Published var isHoveringMusicPlayer: Bool = false
     @Published var isBatteryPopoverActive: Bool = false
 
     @Published var screenUUID: String?

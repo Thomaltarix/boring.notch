@@ -44,6 +44,8 @@ class MusicManager: ObservableObject {
     @Published var playbackRate: Double = 1
     @Published var isShuffled: Bool = false
     @Published var repeatMode: RepeatMode = .off
+    @Published var canShuffle: Bool = true
+    @Published var canRepeat: Bool = true
     @Published var volume: Double = 0.5
     @Published var volumeControlSupported: Bool = true
     @ObservedObject var coordinator = BoringViewCoordinator.shared
@@ -279,6 +281,12 @@ class MusicManager: ObservableObject {
 
         if repeatModeChanged {
             self.repeatMode = state.repeatMode
+        }
+        if state.canShuffle != self.canShuffle {
+            self.canShuffle = state.canShuffle
+        }
+        if state.canRepeat != self.canRepeat {
+            self.canRepeat = state.canRepeat
         }
         if state.isFavorite != self.isFavoriteTrack {
             self.isFavoriteTrack = state.isFavorite

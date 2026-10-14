@@ -22,6 +22,7 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
     // Spotify ignores MediaRemote shuffle/repeat commands and doesn't report its shuffle
     // state reliably through MediaRemote, so for Spotify we go through AppleScript instead.
     private var spotifyExtras: SpotifyScripting.Extras?
+    private var spotifyPlayerInfo = SpotifyPlayerInfo(repeatMode: .off)
     private var spotifyFavoriteURI: String?
     private var spotifyFavoriteValue: Bool = false
     private var spotifySyncInProgress = false
@@ -50,6 +51,8 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
 
         guard let extras = await SpotifyScripting.fetchExtras() else { return }
         spotifyExtras = extras
+        spotifyPlayerInfo = await SpotifyRepeat.playerInfo(
+            trackURI: extras.trackURI, appleScriptRepeating: extras.isRepeating)
 
         let api = SpotifyWebAPI.shared
         var favorite = api.isReady && spotifyFavoriteURI == extras.trackURI ? spotifyFavoriteValue : false
@@ -65,7 +68,9 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
         guard playbackState.bundleIdentifier == SpotifyScripting.bundleIdentifier else { return }
         var updated = playbackState
         updated.isShuffled = extras.isShuffled
-        updated.repeatMode = extras.isRepeating ? .all : .off
+        updated.repeatMode = spotifyPlayerInfo.repeatMode
+        updated.canShuffle = spotifyPlayerInfo.canShuffle
+        updated.canRepeat = spotifyPlayerInfo.canRepeat
         updated.isFavorite = favorite
         if updated != playbackState {
             playbackState = updated
@@ -250,9 +255,11 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
 
     func toggleRepeat() async {
         if playbackState.bundleIdentifier == SpotifyScripting.bundleIdentifier {
-            if let isRepeating = await SpotifyScripting.toggleRepeat() {
-                spotifyExtras?.isRepeating = isRepeating
-                playbackState.repeatMode = isRepeating ? .all : .off
+            if let mode = await SpotifyRepeat.cycle(
+                from: playbackState.repeatMode, canRepeatOne: spotifyPlayerInfo.canRepeatOne) {
+                spotifyExtras?.isRepeating = mode != .off
+                spotifyPlayerInfo.repeatMode = mode
+                playbackState.repeatMode = mode
             }
             return
         }
@@ -406,7 +413,9 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
         if isSpotify, let extras = spotifyExtras {
             // MediaRemote's shuffle/repeat values are unreliable for Spotify
             newPlaybackState.isShuffled = extras.isShuffled
-            newPlaybackState.repeatMode = extras.isRepeating ? .all : .off
+            newPlaybackState.repeatMode = spotifyPlayerInfo.repeatMode
+            newPlaybackState.canShuffle = spotifyPlayerInfo.canShuffle
+            newPlaybackState.canRepeat = spotifyPlayerInfo.canRepeat
         }
 
         self.playbackState = newPlaybackState

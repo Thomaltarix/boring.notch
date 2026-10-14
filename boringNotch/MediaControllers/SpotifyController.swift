@@ -45,6 +45,7 @@ class SpotifyController: MediaControllerProtocol {
     var supportsFavorite: Bool { SpotifyWebAPI.shared.isReady }
 
     private var currentTrackURI: String = ""
+    private var canRepeatOne: Bool = true
     private var favoriteURI: String?
     private var favoriteValue: Bool = false
 
@@ -102,8 +103,8 @@ class SpotifyController: MediaControllerProtocol {
     }
     
     func toggleRepeat() async {
-        if let isRepeating = await SpotifyScripting.toggleRepeat() {
-            playbackState.repeatMode = isRepeating ? .all : .off
+        if let mode = await SpotifyRepeat.cycle(from: playbackState.repeatMode, canRepeatOne: canRepeatOne) {
+            playbackState.repeatMode = mode
         }
     }
     
@@ -146,6 +147,8 @@ class SpotifyController: MediaControllerProtocol {
             }
         }
         currentTrackURI = trackURI
+        let playerInfo = await SpotifyRepeat.playerInfo(trackURI: trackURI, appleScriptRepeating: isRepeating)
+        canRepeatOne = playerInfo.canRepeatOne
         
         var state = PlaybackState(
             bundleIdentifier: "com.spotify.client",
@@ -157,11 +160,13 @@ class SpotifyController: MediaControllerProtocol {
             duration: duration,
             playbackRate: 1,
             isShuffled: isShuffled,
-            repeatMode: isRepeating ? .all : .off,
+            repeatMode: playerInfo.repeatMode,
             lastUpdated: Date(),
             artwork: nil,
             volume: Double(volumePercentage) / 100.0,
-            isFavorite: isFavorite
+            isFavorite: isFavorite,
+            canShuffle: playerInfo.canShuffle,
+            canRepeat: playerInfo.canRepeat
         )
 
         if artworkURL == lastArtworkURL, let existingArtwork = self.playbackState.artwork {

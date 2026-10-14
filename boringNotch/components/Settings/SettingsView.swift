@@ -683,6 +683,10 @@ struct Media: View {
 
             Section {
                 MusicSlotConfigurationView()
+                Defaults.Toggle("Scroll over the player to change the volume", key: .scrollToChangeVolume)
+                Defaults.Toggle("Show volume slider below the controls", key: .showMusicVolumeRow)
+                Defaults.Toggle("Show like button next to the title", key: .showFavoriteNextToTitle)
+                Defaults.Toggle("Grey out shuffle and repeat when unavailable", key: .dimUnavailableMusicControls)
                 Defaults.Toggle(key: .enableLyrics) {
                     HStack {
                         Text("Show lyrics below artist name")
@@ -743,6 +747,22 @@ struct SpotifyLikesSettingsSection: View {
                 }
             }
 
+            Defaults.Toggle("Repeat one track (off → all → one, like Spotify)", key: .spotifyRepeatOne)
+                .disabled(!spotifyAPI.isAuthorized)
+
+            if spotifyAPI.needsReconnectForPlayback {
+                HStack {
+                    Text("Reconnect to enable repeat-one (repeat the current track).")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    Spacer()
+                    Button("Reconnect") {
+                        spotifyAPI.signOut()
+                        Task { await spotifyAPI.authorize() }
+                    }
+                }
+            }
+
             if let error = spotifyAPI.lastError {
                 Text(error)
                     .font(.caption)
@@ -752,7 +772,7 @@ struct SpotifyLikesSettingsSection: View {
             Text("Spotify likes")
         } footer: {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Spotify's AppleScript can't like tracks, so the heart button uses the Spotify Web API. Create an app on the Spotify developer dashboard (Web API), add this redirect URI, then paste its Client ID here:")
+                Text("Spotify's AppleScript can't like tracks or repeat a single track, so the heart and repeat-one use the Spotify Web API. Create an app on the Spotify developer dashboard (Web API), add this redirect URI, then paste its Client ID here:")
                 Text(SpotifyWebAPI.redirectURI)
                     .textSelection(.enabled)
                     .monospaced()

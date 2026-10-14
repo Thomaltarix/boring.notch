@@ -28,6 +28,9 @@ struct PlaybackState {
     var artwork: Data?
     var volume: Double = 0.5
     var isFavorite: Bool = false
+    /// False when the current context doesn't allow it (e.g. Spotify podcasts, radio, ads)
+    var canShuffle: Bool = true
+    var canRepeat: Bool = true
 }
 
 extension PlaybackState: Equatable {
@@ -43,5 +46,7 @@ extension PlaybackState: Equatable {
             && lhs.repeatMode == rhs.repeatMode
             && lhs.artwork == rhs.artwork
             && lhs.isFavorite == rhs.isFavorite
+            && lhs.canShuffle == rhs.canShuffle
+            && lhs.canRepeat == rhs.canRepeat
     }
 }

@@ -30,6 +30,11 @@ This is a personal fork of [TheBoredTeam/boring.notch](https://github.com/TheBor
 
 - **Spotify shuffle / repeat fixed**: they now go through Spotify's AppleScript (Spotify ignores MediaRemote shuffle commands), and the real state is read back from Spotify.
 - **Spotify like (heart button)**: adds or removes the current track from your Liked Songs through the Spotify Web API.
+- **Spotify repeat-one**: the repeat button cycles off → all → one like Spotify (Web API).
+- **Unavailable controls greyed out**: shuffle/repeat are disabled when Spotify doesn't allow them (podcasts, radio, autoplay, ads…).
+- **Volume**: scroll over the music player to change the player's volume, or enable a thin volume slider below the controls.
+- **Like button next to the title**, and shuffle / repeat on each side of the playback controls by default.
+- All of these can be toggled in **Settings → Media**.
 - **Renamed to *My Boring Notch***, and Sparkle no longer pulls official updates (they would overwrite the fork).
 
 ### Setting up Spotify likes
@@ -39,7 +44,7 @@ This is a personal fork of [TheBoredTeam/boring.notch](https://github.com/TheBor
 
 1. Create an app on the [Spotify developer dashboard](https://developer.spotify.com/dashboard) with *Web API* enabled.
 2. Add the redirect URI `http://127.0.0.1:43821/callback`.
-3. In My Boring Notch, open **Settings → Media → Spotify likes**, paste the app's Client ID and click **Connect Spotify**.
+3. In My Boring Notch, open **Settings → Media → Spotify likes**, paste the app's Client ID and click **Connect Spotify**. If you connected before repeat-one was added, click **Reconnect** to grant the playback permissions.
 
 No secrets are stored in the repository: the Client ID lives in the app's preferences and the Spotify token in the macOS Keychain.
 

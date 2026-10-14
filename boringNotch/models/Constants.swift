@@ -183,6 +183,12 @@ extension Defaults.Keys {
     // MARK: Media Controller
     static let mediaController = Key<MediaControllerType>("mediaController", default: defaultMediaController)
     static let spotifyClientID = Key<String>("spotifyClientID", default: "")
+    static let spotifyGrantedScopes = Key<String>("spotifyGrantedScopes", default: "")
+    static let spotifyRepeatOne = Key<Bool>("spotifyRepeatOne", default: true)
+    static let showMusicVolumeRow = Key<Bool>("showMusicVolumeRow", default: false)
+    static let scrollToChangeVolume = Key<Bool>("scrollToChangeVolume", default: true)
+    static let showFavoriteNextToTitle = Key<Bool>("showFavoriteNextToTitle", default: true)
+    static let dimUnavailableMusicControls = Key<Bool>("dimUnavailableMusicControls", default: true)
     
     // MARK: Advanced Settings
     static let useCustomAccentColor = Key<Bool>("useCustomAccentColor", default: false)

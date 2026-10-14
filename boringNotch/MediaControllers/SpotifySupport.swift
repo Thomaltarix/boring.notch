@@ -5,8 +5,9 @@
 //  Spotify helpers shared by SpotifyController and NowPlayingController:
 //  - SpotifyScripting: reliable shuffle / repeat / track URI through Spotify's AppleScript
 //    dictionary (Spotify ignores MediaRemote shuffle commands).
-//  - SpotifyWebAPI: "Save to Liked Songs" through the Spotify Web API (OAuth PKCE with a
-//    loopback redirect), since Spotify's AppleScript dictionary has no like command.
+//  - SpotifyWebAPI: "Save to Liked Songs" and repeat-one through the Spotify Web API (OAuth
+//    PKCE with a loopback redirect), since Spotify's AppleScript dictionary has neither.
+//  - SpotifyRepeat: off → all → one cycle, falling back to AppleScript (off/all) without the API.
 //
 
 import AppKit
@@ -88,6 +89,62 @@ enum SpotifyScripting {
     }
 }
 
+// MARK: - Player state (repeat + available actions)
+
+/// What the notch needs from Spotify's player beyond AppleScript: repeat-one and which
+/// controls the current context allows (Spotify greys out shuffle/repeat for podcasts,
+/// radio, autoplay, DJ, ads…).
+struct SpotifyPlayerInfo: Equatable {
+    var repeatMode: RepeatMode
+    var canShuffle: Bool = true
+    var canRepeat: Bool = true
+    var canRepeatOne: Bool = true
+}
+
+/// Spotify-style repeat: off → all (playlist/album) → one (current track).
+/// Repeat-one only exists in the Web API; without it we fall back to AppleScript's on/off.
+enum SpotifyRepeat {
+    static func next(after mode: RepeatMode, allowRepeatOne: Bool) -> RepeatMode {
+        switch mode {
+        case .off: return .all
+        case .all: return allowRepeatOne ? .one : .off
+        case .one: return .off
+        }
+    }
+
+    /// Advances the repeat mode and returns the new one, or nil if Spotify couldn't be reached.
+    static func cycle(from current: RepeatMode, canRepeatOne: Bool = true) async -> RepeatMode? {
+        let api = SpotifyWebAPI.shared
+        if api.canControlPlayback {
+            let target = next(after: current, allowRepeatOne: Defaults[.spotifyRepeatOne] && canRepeatOne)
+            do {
+                try await api.setRepeatMode(target)
+                return target
+            } catch {
+                print("[SpotifyRepeat] Web API repeat failed, using AppleScript: \(error.localizedDescription)")
+            }
+        }
+        guard let isRepeating = await SpotifyScripting.toggleRepeat() else { return nil }
+        return isRepeating ? .all : .off
+    }
+
+    /// Resolves the player state from AppleScript's values, refined by the Web API when connected.
+    static func playerInfo(trackURI: String, appleScriptRepeating: Bool) async -> SpotifyPlayerInfo {
+        let api = SpotifyWebAPI.shared
+        if api.canControlPlayback, let info = try? await api.playerInfo(trackURI: trackURI) {
+            return info
+        }
+        // Without the API, podcasts and ads are the cases we can detect ourselves
+        let isMusic = !trackURI.hasPrefix("spotify:episode:") && !trackURI.hasPrefix("spotify:ad:")
+        return SpotifyPlayerInfo(
+            repeatMode: appleScriptRepeating ? .all : .off,
+            canShuffle: isMusic,
+            canRepeat: isMusic,
+            canRepeatOne: isMusic
+        )
+    }
+}
+
 // MARK: - Web API errors
 
 enum SpotifyWebAPIError: LocalizedError {
@@ -132,18 +189,22 @@ final class SpotifyWebAPI: ObservableObject, @unchecked Sendable {
 
     static let callbackPort: UInt16 = 43821
     static let redirectURI = "http://127.0.0.1:\(callbackPort)/callback"
-    static let scopes = "user-library-read user-library-modify"
+    static let scopes = "user-library-read user-library-modify user-read-playback-state user-modify-playback-state"
+    static let playbackScope = "user-modify-playback-state"
     static let dashboardURL = URL(string: "https://developer.spotify.com/dashboard")!
 
     @Published private(set) var isAuthorized: Bool = false
     @Published private(set) var isAuthorizing: Bool = false
     @Published private(set) var lastError: String?
+    /// Scopes granted by the last token response; older connections lack the playback scopes.
+    @Published private(set) var grantedScopes: String = Defaults[.spotifyGrantedScopes]
 
     private let lock = NSLock()
     private var accessToken: String?
     private var accessTokenExpiry: Date = .distantPast
     private var refreshToken: String?
     private var refreshTask: Task<String, Error>?
+    private var playerCache: (info: SpotifyPlayerInfo, trackURI: String, date: Date)?
 
     private let keychainService = "com.boringnotch.spotify"
     private let keychainAccount = "refresh_token"
@@ -163,6 +224,16 @@ final class SpotifyWebAPI: ObservableObject, @unchecked Sendable {
         return hasRefreshToken && !clientID.isEmpty
     }
 
+    /// True when repeat can be driven through the Web API (needs the playback scopes).
+    var canControlPlayback: Bool {
+        isReady && Defaults[.spotifyGrantedScopes].split(separator: " ").contains(Substring(Self.playbackScope))
+    }
+
+    /// Connected before the playback scopes were requested: a reconnection is needed for repeat-one.
+    var needsReconnectForPlayback: Bool {
+        isAuthorized && !grantedScopes.split(separator: " ").contains(Substring(Self.playbackScope))
+    }
+
     // MARK: Library
 
     func isSaved(uri: String) async throws -> Bool {
@@ -175,11 +246,74 @@ final class SpotifyWebAPI: ObservableObject, @unchecked Sendable {
         _ = try await send(method: saved ? "PUT" : "DELETE", path: "/me/library", uris: [uri])
     }
 
-    private func send(method: String, path: String, uris: [String], isRetry: Bool = false) async throws -> Data {
+    // MARK: Player
+
+    /// Repeat mode and allowed actions of the active device, or nil when nothing is playing on
+    /// Spotify Connect. Cached briefly per track: Spotify sends bursts of notifications and may
+    /// report stale values right after a change.
+    func playerInfo(trackURI: String) async throws -> SpotifyPlayerInfo? {
+        if let cached = lock.withLock({ playerCache }), cached.trackURI == trackURI,
+           Date().timeIntervalSince(cached.date) < 1.5 {
+            return cached.info
+        }
+        let data = try await send(method: "GET", path: "/me/player", query: "")
+        guard !data.isEmpty else { return nil }
+
+        struct Player: Decodable {
+            struct Actions: Decodable { let disallows: [String: Bool]? }
+            let repeat_state: String
+            let actions: Actions?
+        }
+        let player = try JSONDecoder().decode(Player.self, from: data)
+        let disallows = player.actions?.disallows ?? [:]
+        let canRepeatContext = disallows["toggling_repeat_context"] != true
+        let canRepeatTrack = disallows["toggling_repeat_track"] != true
+        let info = SpotifyPlayerInfo(
+            repeatMode: Self.repeatMode(from: player.repeat_state),
+            canShuffle: disallows["toggling_shuffle"] != true,
+            canRepeat: canRepeatContext || canRepeatTrack,
+            canRepeatOne: canRepeatTrack
+        )
+        lock.withLock { playerCache = (info, trackURI, Date()) }
+        return info
+    }
+
+    func setRepeatMode(_ mode: RepeatMode) async throws {
+        let state: String
+        switch mode {
+        case .off: state = "off"
+        case .all: state = "context"
+        case .one: state = "track"
+        }
+        _ = try await send(method: "PUT", path: "/me/player/repeat", query: "state=\(state)")
+        lock.withLock {
+            if var cached = playerCache {
+                cached.info.repeatMode = mode
+                cached.date = Date()
+                playerCache = cached
+            }
+        }
+    }
+
+    private static func repeatMode(from state: String) -> RepeatMode {
+        switch state {
+        case "track": return .one
+        case "context": return .all
+        default: return .off
+        }
+    }
+
+    private func send(method: String, path: String, uris: [String]) async throws -> Data {
+        try await send(method: method, path: path, query: "uris=" + uris.map(Self.percentEncode).joined(separator: ","))
+    }
+
+    private func send(method: String, path: String, query: String, isRetry: Bool = false) async throws -> Data {
         let token = try await validAccessToken()
 
         var components = URLComponents(string: "https://api.spotify.com/v1" + path)!
-        components.percentEncodedQuery = "uris=" + uris.map(Self.percentEncode).joined(separator: ",")
+        if !query.isEmpty {
+            components.percentEncodedQuery = query
+        }
 
         var request = URLRequest(url: components.url!)
         request.httpMethod = method
@@ -190,7 +324,7 @@ final class SpotifyWebAPI: ObservableObject, @unchecked Sendable {
 
         if status == 401 && !isRetry {
             invalidateAccessToken()
-            return try await send(method: method, path: path, uris: uris, isRetry: true)
+            return try await send(method: method, path: path, query: query, isRetry: true)
         }
         guard (200..<300).contains(status) else {
             throw SpotifyWebAPIError.http(status: status, body: String(data: data, encoding: .utf8) ?? "")
@@ -269,8 +403,11 @@ final class SpotifyWebAPI: ObservableObject, @unchecked Sendable {
             refreshToken = nil
             refreshTask?.cancel()
             refreshTask = nil
+            playerCache = nil
         }
         deleteKeychain()
+        Defaults[.spotifyGrantedScopes] = ""
+        grantedScopes = ""
         isAuthorized = false
         lastError = nil
         MusicManager.shared.refreshFavoriteSupport()
@@ -282,6 +419,7 @@ final class SpotifyWebAPI: ObservableObject, @unchecked Sendable {
         let access_token: String
         let expires_in: Int
         let refresh_token: String?
+        let scope: String?
     }
 
     private enum TokenLookup {
@@ -361,6 +499,10 @@ final class SpotifyWebAPI: ObservableObject, @unchecked Sendable {
         }
         if let tokenToPersist {
             writeKeychain(tokenToPersist)
+        }
+        if let scope = response.scope {
+            Defaults[.spotifyGrantedScopes] = scope
+            DispatchQueue.main.async { self.grantedScopes = scope }
         }
     }
 

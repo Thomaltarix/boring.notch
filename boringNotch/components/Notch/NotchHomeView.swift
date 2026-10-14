@@ -14,12 +14,175 @@ import SwiftUI
 
 struct MusicPlayerView: View {
     @EnvironmentObject var vm: BoringViewModel
+    @ObservedObject var musicManager = MusicManager.shared
+    @ObservedObject var scrollVolume = ScrollVolumeController.shared
+    @Default(.scrollToChangeVolume) private var scrollToChangeVolume
     let albumArtNamespace: Namespace.ID
+
+    private var scrollVolumeEnabled: Bool {
+        scrollToChangeVolume && musicManager.volumeControlSupported
+    }
 
     var body: some View {
         HStack {
             AlbumArtView(vm: vm, albumArtNamespace: albumArtNamespace).padding(.all, 5)
+                .overlay {
+                    if let level = scrollVolume.indicatorLevel {
+                        ScrollVolumeIndicator(level: level)
+                            .transition(.opacity)
+                    }
+                }
             MusicControlsView().drawingGroup().compositingGroup()
+        }
+        .animation(.easeOut(duration: 0.2), value: scrollVolume.indicatorLevel == nil)
+        .background {
+            if scrollVolumeEnabled {
+                VolumeScrollMonitor { delta in
+                    ScrollVolumeController.shared.scroll(by: delta)
+                }
+            }
+        }
+        .onHover { hovering in
+            vm.isHoveringMusicPlayer = hovering && scrollVolumeEnabled
+        }
+        .onChange(of: scrollVolumeEnabled) { _, enabled in
+            if !enabled { vm.isHoveringMusicPlayer = false }
+        }
+        .onDisappear {
+            vm.isHoveringMusicPlayer = false
+        }
+    }
+}
+
+// MARK: - Scroll to change volume
+
+/// Turns scroll events over the music player into volume changes for the playing app.
+@MainActor
+final class ScrollVolumeController: ObservableObject {
+    static let shared = ScrollVolumeController()
+
+    /// Volume shown by the indicator while scrolling, nil when hidden.
+    @Published private(set) var indicatorLevel: Double?
+
+    private var lastSent = Date.distantPast
+    private var trailingTask: Task<Void, Never>?
+    private var hideTask: Task<Void, Never>?
+    private let sendInterval: TimeInterval = 0.08
+
+    func scroll(by delta: Double) {
+        let current = indicatorLevel ?? MusicManager.shared.volume
+        let level = min(max(current + delta, 0), 1)
+        indicatorLevel = level
+        // Immediate feedback in the volume slot / row, before the app confirms
+        MusicManager.shared.volume = level
+
+        // Throttle AppleScript calls, but always send the last value
+        trailingTask?.cancel()
+        let elapsed = Date().timeIntervalSince(lastSent)
+        if elapsed >= sendInterval {
+            send(level)
+        } else {
+            trailingTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(self?.sendInterval ?? 0.08))
+                guard !Task.isCancelled else { return }
+                self?.send(level)
+            }
+        }
+
+        hideTask?.cancel()
+        hideTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            self?.indicatorLevel = nil
+        }
+    }
+
+    private func send(_ level: Double) {
+        lastSent = Date()
+        MusicManager.shared.setVolume(to: level)
+    }
+}
+
+private struct ScrollVolumeIndicator: View {
+    let level: Double
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+            Text("\(Int((level * 100).rounded()))%")
+                .monospacedDigit()
+        }
+        .font(.system(size: 11, weight: .semibold))
+        .foregroundColor(.white)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Capsule().fill(.black.opacity(0.75)))
+    }
+
+    private var icon: String {
+        if level == 0 { return "speaker.slash.fill" }
+        if level < 0.33 { return "speaker.1.fill" }
+        if level < 0.66 { return "speaker.2.fill" }
+        return "speaker.3.fill"
+    }
+}
+
+/// Reports vertical scrolls over its area (up = louder, whatever the natural scrolling setting).
+private struct VolumeScrollMonitor: NSViewRepresentable {
+    let onScroll: (Double) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        context.coordinator.install(on: view)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.onScroll = onScroll
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.remove()
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(onScroll: onScroll) }
+
+    @MainActor final class Coordinator {
+        var onScroll: (Double) -> Void
+        private var monitor: Any?
+
+        init(onScroll: @escaping (Double) -> Void) {
+            self.onScroll = onScroll
+        }
+
+        func install(on view: NSView) {
+            remove()
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel]) { [weak self, weak view] event in
+                guard let self, let view, event.window === view.window,
+                      view.bounds.contains(view.convert(event.locationInWindow, from: nil)) else { return event }
+                self.handle(event)
+                return event
+            }
+        }
+
+        func remove() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+        }
+
+        private func handle(_ event: NSEvent) {
+            // Ignore trackpad inertia so the volume stops when the fingers lift
+            guard event.momentumPhase.isEmpty else { return }
+            let deltaY = event.scrollingDeltaY
+            guard abs(deltaY) > abs(event.scrollingDeltaX) else { return }
+            // Undo natural scrolling so that fingers / wheel up always means louder
+            let up = event.isDirectionInvertedFromDevice ? -deltaY : deltaY
+            // Trackpads report pixels, mouse wheels report lines
+            let step = event.hasPreciseScrollingDeltas ? up * 0.004 : up * 0.03
+            guard step != 0 else { return }
+            onScroll(step)
         }
     }
 }
@@ -118,41 +281,64 @@ struct MusicControlsView: View {
     @State private var lastDragged: Date = .distantPast
     @Default(.musicControlSlots) private var slotConfig
     @Default(.musicControlSlotLimit) private var slotLimit
+    @Default(.showMusicVolumeRow) private var showVolumeRow
+    @Default(.showFavoriteNextToTitle) private var showFavoriteNextToTitle
+    @Default(.dimUnavailableMusicControls) private var dimUnavailableControls
 
     var body: some View {
         VStack(alignment: .leading) {
             songInfoAndSlider
             slotToolbar
+            if showVolumeRow && musicManager.volumeControlSupported {
+                MusicVolumeRow()
+                    .frame(maxWidth: 160)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.top, -4)
+            }
         }
         .buttonStyle(PlainButtonStyle())
     }
 
     private var songInfoAndSlider: some View {
         GeometryReader { geo in
+            // Progress bar pinned to the bottom, free space stays between it and the title
             VStack(alignment: .leading, spacing: 4) {
                 songInfo(width: geo.size.width)
+                Spacer(minLength: 0)
                 musicSlider
             }
+            .frame(height: geo.size.height, alignment: .top)
         }
         .padding(.top, 10)
         .padding(.leading, 5)
     }
 
     private func songInfo(width: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            MarqueeText(
-                $musicManager.songTitle, font: .headline, nsFont: .headline, textColor: .white,
-                frameWidth: width)
-            MarqueeText(
-                $musicManager.artistName,
-                font: .headline,
-                nsFont: .headline,
-                textColor: Defaults[.playerColorTinting]
-                    ? Color(nsColor: musicManager.avgColor)
-                        .ensureMinimumBrightness(factor: 0.6) : .gray,
-                frameWidth: width
-            )
-            .fontWeight(.medium)
+        // Like button next to the title, like Spotify's now-playing bar
+        let showFavorite = showFavoriteNextToTitle && musicManager.canFavoriteTrack
+        let titleWidth = showFavorite ? width - 34 : width
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 4) {
+                VStack(alignment: .leading, spacing: 0) {
+                    MarqueeText(
+                        $musicManager.songTitle, font: .headline, nsFont: .headline, textColor: .white,
+                        frameWidth: titleWidth)
+                    MarqueeText(
+                        $musicManager.artistName,
+                        font: .headline,
+                        nsFont: .headline,
+                        textColor: Defaults[.playerColorTinting]
+                            ? Color(nsColor: musicManager.avgColor)
+                                .ensureMinimumBrightness(factor: 0.6) : .gray,
+                        frameWidth: titleWidth
+                    )
+                    .fontWeight(.medium)
+                }
+                if showFavorite {
+                    FavoriteControlButton()
+                        .transition(.opacity)
+                }
+            }
             if Defaults[.enableLyrics] {
                 TimelineView(.animation(minimumInterval: 0.25)) { timeline in
                     let currentElapsed: Double = {
@@ -244,6 +430,7 @@ struct MusicControlsView: View {
             HoverButton(icon: "shuffle", iconColor: musicManager.isShuffled ? .red : .primary, scale: .medium) {
                 MusicManager.shared.toggleShuffle()
             }
+            .unavailable(dimUnavailableControls && !musicManager.canShuffle)
         case .previous:
             HoverButton(icon: "backward.fill", scale: .medium) {
                 MusicManager.shared.previousTrack()
@@ -260,6 +447,7 @@ struct MusicControlsView: View {
             HoverButton(icon: repeatIcon, iconColor: repeatIconColor, scale: .medium) {
                 MusicManager.shared.toggleRepeat()
             }
+            .unavailable(dimUnavailableControls && !musicManager.canRepeat)
         case .volume:
             VolumeControlView()
         case .favorite:
@@ -318,10 +506,86 @@ struct FavoriteControlButton: View {
     }
 }
 
+private extension View {
+    /// Greys out and disables a control, like Spotify does for actions the context doesn't allow.
+    func unavailable(_ isUnavailable: Bool) -> some View {
+        disabled(isUnavailable)
+            .opacity(isUnavailable ? 0.35 : 1)
+    }
+}
+
 private extension Array where Element == MusicControlButton {
     func padded(to length: Int, filler: MusicControlButton) -> [MusicControlButton] {
         if count >= length { return self }
         return self + Array(repeating: filler, count: length - count)
+    }
+}
+
+// MARK: - Volume Row
+
+/// Always-visible volume slider shown under the playback controls (controls the player app's
+/// own volume, not the system volume).
+struct MusicVolumeRow: View {
+    @ObservedObject var musicManager = MusicManager.shared
+    @State private var volumeSliderValue: Double = 0.5
+    @State private var dragging: Bool = false
+    @State private var lastVolumeUpdateTime: Date = Date.distantPast
+    @State private var volumeBeforeMute: Double = 0.5
+    private let volumeUpdateThrottle: TimeInterval = 0.1
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button(action: toggleMute) {
+                Image(systemName: volumeSliderValue == 0 ? "speaker.slash.fill" : "speaker.fill")
+                    .frame(width: 12)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(PlainButtonStyle())
+
+            CustomSlider(
+                value: $volumeSliderValue,
+                range: 0.0...1.0,
+                color: .white,
+                dragging: $dragging,
+                lastDragged: .constant(Date.distantPast),
+                onValueChange: { newValue in
+                    MusicManager.shared.setVolume(to: newValue)
+                },
+                onDragChange: { newValue in
+                    let now = Date()
+                    if now.timeIntervalSince(lastVolumeUpdateTime) > volumeUpdateThrottle {
+                        MusicManager.shared.setVolume(to: newValue)
+                        lastVolumeUpdateTime = now
+                    }
+                },
+                trackHeight: 3
+            )
+            .frame(height: 8)
+
+            Image(systemName: "speaker.wave.3.fill")
+                .frame(width: 14)
+        }
+        .font(.system(size: 8, weight: .medium))
+        .foregroundColor(.gray)
+        .frame(height: 8)
+        .onReceive(musicManager.$volume) { volume in
+            if !dragging {
+                volumeSliderValue = volume
+            }
+        }
+        .task {
+            await MusicManager.shared.syncVolumeFromActiveApp()
+        }
+    }
+
+    private func toggleMute() {
+        if volumeSliderValue > 0 {
+            volumeBeforeMute = volumeSliderValue
+            volumeSliderValue = 0
+        } else {
+            volumeSliderValue = volumeBeforeMute > 0 ? volumeBeforeMute : 0.5
+        }
+        MusicManager.shared.setVolume(to: volumeSliderValue)
     }
 }
 
@@ -534,11 +798,12 @@ struct CustomSlider: View {
     @Binding var lastDragged: Date
     var onValueChange: ((Double) -> Void)?
     var onDragChange: ((Double) -> Void)?
+    var trackHeight: CGFloat = 5
 
     var body: some View {
         GeometryReader { geometry in
             let width = geometry.size.width
-            let height = CGFloat(dragging ? 9 : 5)
+            let height = dragging ? trackHeight + 4 : trackHeight
             let rangeSpan = range.upperBound - range.lowerBound
 
             let progress = rangeSpan == .zero ? 0 : (value - range.lowerBound) / rangeSpan
