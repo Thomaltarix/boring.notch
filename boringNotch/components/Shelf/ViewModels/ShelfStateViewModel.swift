@@ -48,6 +48,16 @@ final class ShelfStateViewModel: ObservableObject {
         items.removeAll { $0.id == item.id }
     }
 
+    /// Removes several items at once. `cleanup: false` keeps temporary files on disk (cut).
+    func remove(_ itemsToRemove: [ShelfItem], cleanup: Bool = true) {
+        guard !itemsToRemove.isEmpty else { return }
+        if cleanup {
+            itemsToRemove.forEach { $0.cleanupStoredData() }
+        }
+        let ids = Set(itemsToRemove.map(\.id))
+        items.removeAll { ids.contains($0.id) }
+    }
+
     func updateBookmark(for item: ShelfItem, bookmark: Data) {
         guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
         if case .file = items[idx].kind {

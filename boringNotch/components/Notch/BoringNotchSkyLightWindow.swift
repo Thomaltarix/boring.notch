@@ -109,6 +109,10 @@ class BoringNotchSkyLightWindow: NSPanel {
     
     private var observers: Set<AnyCancellable> = []
     
-    override var canBecomeKey: Bool { false }
+    /// The notch never takes keyboard focus, except while the user works in the shelf
+    /// (see ShelfKeyboardController).
+    var acceptsKeyboardFocus = false
+
+    override var canBecomeKey: Bool { acceptsKeyboardFocus }
     override var canBecomeMain: Bool { false }
 }

@@ -22,7 +22,6 @@ final class ShelfItemViewModel: ObservableObject {
     private var sharingLifecycle: SharingLifecycleDelegate?
     private var quickShareLifecycle: SharingLifecycleDelegate?
     private var sharingAccessingURLs: [URL] = []
-    private static var copiedURLs: [URL] = []
 
     private let selection = ShelfSelectionModel.shared
 
@@ -98,6 +97,7 @@ final class ShelfItemViewModel: ObservableObject {
 
     // MARK: - Actions
     func handleClick(event: NSEvent, view: NSView) {
+        ShelfKeyboardController.shared.activate(in: view.window)
         let flags = event.modifierFlags
         if flags.contains(.shift) {
             selection.shiftSelect(to: item, in: ShelfStateViewModel.shared.items)
@@ -112,6 +112,7 @@ final class ShelfItemViewModel: ObservableObject {
     }
 
     func handleRightClick(event: NSEvent, view: NSView) {
+        ShelfKeyboardController.shared.activate(in: view.window)
         if !selection.isSelected(item.id) { selection.selectSingle(item) }
         presentContextMenu(event: event, in: view)
     }
@@ -357,7 +358,8 @@ final class ShelfItemViewModel: ObservableObject {
 
         if selectedItems.count == 1, case .file(_) = item.kind { addMenuItem(title: "Rename") }
 
-        // Always show "Copy" for all item types
+        // Always show "Cut" / "Copy" for all item types
+        addMenuItem(title: "Cut")
         addMenuItem(title: "Copy")
         // If there are file URLs, add "Copy Path" as an alternate menu item (Option key)
         if !selectedFileURLs.isEmpty {
@@ -367,8 +369,12 @@ final class ShelfItemViewModel: ObservableObject {
             menu.addItem(copyPathItem)
         }
 
+        if ShelfActionService.canPaste { addMenuItem(title: "Paste") }
+
         menu.addItem(NSMenuItem.separator())
+        addMenuItem(title: "Select All")
         addMenuItem(title: "Remove")
+        addMenuItem(title: "Clear Shelf")
 
         let actionTarget = MenuActionTarget(item: item, view: view, viewModel: self)
 
@@ -508,41 +514,23 @@ final class ShelfItemViewModel: ObservableObject {
                 }
 
             case "Copy":
-                let selected = ShelfSelectionModel.shared.selectedItems(in: ShelfStateViewModel.shared.items)
-                let pb = NSPasteboard.general
-                
-                // Stop accessing previously copied URLs
-                for url in ShelfItemViewModel.copiedURLs {
-                    url.stopAccessingSecurityScopedResource()
-                }
-                ShelfItemViewModel.copiedURLs.removeAll()
-                
-                pb.clearContents()
-                Task {
-                    let fileURLs = await selected.asyncCompactMap { item -> URL? in
-                        if case .file = item.kind {
-                            return ShelfStateViewModel.shared.resolveAndUpdateBookmark(for: item)
-                        }
-                        return nil
-                    }
-                    if !fileURLs.isEmpty {
-                        // Start security-scoped access for all URLs and keep them active
-                        ShelfItemViewModel.copiedURLs = fileURLs.filter { $0.startAccessingSecurityScopedResource() }
-                        NSLog("🔐 Started security-scoped access for \(ShelfItemViewModel.copiedURLs.count) copied files")
-                        
-                        // Write to pasteboard
-                        pb.writeObjects(fileURLs as [NSURL])
-                    } else {
-                        let strings = selected.map { $0.displayName }
-                        if !strings.isEmpty {
-                            pb.setString(strings.joined(separator: "\n"), forType: .string)
-                        }
-                    }
-                }
+                ShelfActionService.copySelection()
+
+            case "Cut":
+                ShelfActionService.cutSelection()
+
+            case "Paste":
+                ShelfActionService.paste()
+
+            case "Select All":
+                ShelfActionService.selectAll()
+                ShelfKeyboardController.shared.activate(in: view?.window)
+
+            case "Clear Shelf":
+                ShelfActionService.clearShelf()
 
             case "Remove":
-                let selected = ShelfSelectionModel.shared.selectedItems(in: ShelfStateViewModel.shared.items)
-                for it in selected { ShelfActionService.remove(it) }
+                ShelfActionService.removeSelection()
                 
             case "Remove Background":
                 handleRemoveBackground()
